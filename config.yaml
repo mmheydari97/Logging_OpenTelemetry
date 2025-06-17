@@ -1,0 +1,30 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+exporters:
+  # This exporter sends logs to the FastAPI viewer
+  otlphttp:
+    logs_endpoint: http://host.docker.internal:8000/api/logs
+    compression: gzip
+    headers:
+      Content-Type: application/json
+    # Use insecure connection for local development 
+    tls:
+      insecure: true
+
+  # This exporter prints logs to the console for debugging
+  debug:
+    verbosity: detailed
+
+processors:
+  batch:
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, otlphttp]

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Log Viewer</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>📊 OpenTelemetry Log Viewer</h1>
+        <table class="logs-table">
+            <thead>
+                <tr>
+                    <th>Timestamp</th> 
+                    <th>Level</th> 
+                    <th>Function</th> 
+                    <th>Duration</th> 
+                    <th>Status</th> 
+                    <th>Message</th> 
+                </tr>
+            </thead>
+            <tbody id="logsTableBody">
+                <tr><td colspan="6" class="loading">Loading logs...</td></tr> 
+            </tbody>
+        </table>
+    </div>
+    <div id="logModal" class="modal">
+        <div class="modal-content">
+            <span onclick="closeModal()" style="float:right;cursor:pointer;">&times;</span>
+            <h2>Log Details</h2>
+            <div id="logDetails" class="json-viewer"></div>
+        </div>
+    </div>
+    <script src="/static/js/scripts.js"></script>
+</body>
+</html>
