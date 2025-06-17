@@ -2,20 +2,21 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.datastructures import Headers
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
 import gzip
 import json
 import logging
-from pydantic import BaseModel
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 import uuid
-from datetime import datetime
 from collections import defaultdict
+from pydantic import BaseModel
+
 from google.protobuf.json_format import MessageToDict
-from opentelemetry.proto.logs.v1 import logs_pb2
 from opentelemetry.proto.collector.logs.v1 import logs_service_pb2
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class LogRecord(BaseModel):
     id: str
@@ -61,9 +62,12 @@ class LogStorage:
         self.logs.append(log_record)
         self.logs_by_function[log_record.function_name].append(log_record)
         
+        # Keep only last 1000 logs
         if len(self.logs) > 1000:
             removed_log = self.logs.pop(0)
-            self.logs_by_function[removed_log.function_name].remove(removed_log)
+            if removed_log.function_name in self.logs_by_function:
+                if removed_log in self.logs_by_function[removed_log.function_name]:
+                    self.logs_by_function[removed_log.function_name].remove(removed_log)
         
         return log_id
 
@@ -80,71 +84,35 @@ class LogStorage:
                 return log
         return None
 
-
-# class GzipRequestMiddleware:
-#     def __init__(self, app):
-#         self.app = app
-
-#     async def __call__(self, scope, receive, send):
-#         if scope["type"] == "http":
-#             headers = dict(scope["headers"])
-#             if b"content-encoding" in headers and headers[b"content-encoding"] == b"gzip":
-                
-#                 original_receive = receive
-                
-#                 async def receive_decompressed() -> Message:
-#                     message = await original_receive()
-                    
-#                     if message["type"] == "http.request":
-#                         if message.get("body"):
-#                             message["body"] = gzip.decompress(message["body"])
-                    
-#                     return message
-                
-#                 receive = receive_decompressed
-
-#         await self.app(scope, receive, send)
-
-
-def extract_attribute_value(attribute):
-    """Extract value from OTLP attribute protobuf object"""
-    if attribute.value.HasField('string_value'):
-        return attribute.value.string_value
-    elif attribute.value.HasField('int_value'):
-        return attribute.value.int_value
-    elif attribute.value.HasField('double_value'):
-        return attribute.value.double_value
-    elif attribute.value.HasField('bool_value'):
-        return attribute.value.bool_value
-    elif attribute.value.HasField('bytes_value'):
-        return attribute.value.bytes_value.decode('utf-8', errors='ignore')
-    elif attribute.value.HasField('array_value'):
-        return [extract_attribute_value(item) for item in attribute.value.array_value.values]
-    elif attribute.value.HasField('kvlist_value'):
-        return {kv.key: extract_attribute_value(kv.value) for kv in attribute.value.kvlist_value.values}
+def extract_attribute_value(attr_dict):
+    """Extract value from OTLP attribute dictionary"""
+    value_dict = attr_dict.get('value', {})
+    
+    if 'string_value' in value_dict:
+        return value_dict['string_value']
+    elif 'int_value' in value_dict:
+        return int(value_dict['int_value'])
+    elif 'double_value' in value_dict:
+        return float(value_dict['double_value'])
+    elif 'bool_value' in value_dict:
+        return value_dict['bool_value']
+    elif 'bytes_value' in value_dict:
+        return value_dict['bytes_value']
     else:
-        return str(attribute.value)
+        return str(value_dict)
 
-
-def extract_any_value(any_value):
-    """Extract value from OTLP AnyValue protobuf object"""
-    if any_value.HasField('string_value'):
-        return any_value.string_value
-    elif any_value.HasField('int_value'):
-        return any_value.int_value
-    elif any_value.HasField('double_value'):
-        return any_value.double_value
-    elif any_value.HasField('bool_value'):
-        return any_value.bool_value
-    elif any_value.HasField('bytes_value'):
-        return any_value.bytes_value.decode('utf-8', errors='ignore')
-    elif any_value.HasField('array_value'):
-        return [extract_any_value(item) for item in any_value.array_value.values]
-    elif any_value.HasField('kvlist_value'):
-        return {kv.key: extract_any_value(kv.value) for kv in any_value.kvlist_value.values}
+def extract_body_value(body_dict):
+    """Extract value from OTLP body dictionary"""
+    if 'string_value' in body_dict:
+        return body_dict['string_value']
+    elif 'int_value' in body_dict:
+        return str(body_dict['int_value'])
+    elif 'double_value' in body_dict:
+        return str(body_dict['double_value'])
+    elif 'bool_value' in body_dict:
+        return str(body_dict['bool_value'])
     else:
-        return str(any_value)
-
+        return str(body_dict)
 
 def parse_protobuf_logs(protobuf_data: bytes) -> List[Dict[str, Any]]:
     """Parse OTLP protobuf logs data and return list of log dictionaries"""
@@ -153,49 +121,60 @@ def parse_protobuf_logs(protobuf_data: bytes) -> List[Dict[str, Any]]:
         export_request = logs_service_pb2.ExportLogsServiceRequest()
         export_request.ParseFromString(protobuf_data)
         
+        # Convert to dictionary for easier processing
+        protobuf_dict = MessageToDict(export_request, preserving_proto_field_name=True)
+        
         parsed_logs = []
         
-        for resource_logs in export_request.resource_logs:
+        for resource_logs in protobuf_dict.get('resource_logs', []):
             # Extract resource attributes
             resource_attributes = {}
-            if resource_logs.resource:
-                for attr in resource_logs.resource.attributes:
-                    resource_attributes[attr.key] = extract_attribute_value(attr)
+            for attr in resource_logs.get('resource', {}).get('attributes', []):
+                key = attr.get('key')
+                value = extract_attribute_value(attr)
+                resource_attributes[key] = value
             
-            for scope_logs in resource_logs.scope_logs:
-                # Extract scope attributes
-                scope_attributes = {}
-                if scope_logs.scope:
-                    for attr in scope_logs.scope.attributes:
-                        scope_attributes[attr.key] = extract_attribute_value(attr)
+            for scope_logs in resource_logs.get('scope_logs', []):
+                # Extract scope info
+                scope_name = scope_logs.get('scope', {}).get('name', 'unknown')
                 
-                for log_record in scope_logs.log_records:
+                for log_record in scope_logs.get('log_records', []):
                     # Extract log record attributes
                     log_attributes = {}
-                    for attr in log_record.attributes:
-                        log_attributes[attr.key] = extract_attribute_value(attr)
+                    for attr in log_record.get('attributes', []):
+                        key = attr.get('key')
+                        value = extract_attribute_value(attr)
+                        log_attributes[key] = value
                     
                     # Extract log body
                     body = ""
-                    if log_record.body:
-                        body = extract_any_value(log_record.body)
+                    if 'body' in log_record:
+                        body = extract_body_value(log_record['body'])
                     
                     # Convert timestamp from nanoseconds to ISO format
-                    timestamp = datetime.fromtimestamp(log_record.time_unix_nano / 1_000_000_000).isoformat() if log_record.time_unix_nano else datetime.utcnow().isoformat()
+                    timestamp_nano = log_record.get('time_unix_nano')
+                    if timestamp_nano:
+                        # Convert string nanoseconds to datetime
+                        timestamp_seconds = int(timestamp_nano) / 1_000_000_000
+                        timestamp = datetime.fromtimestamp(timestamp_seconds).isoformat()
+                    else:
+                        timestamp = datetime.utcnow().isoformat()
                     
                     # Try to extract structured data from otel.log_data attribute
-                    otel_log_data = log_attributes.get('otel.log_data', {})
-                    if isinstance(otel_log_data, str):
+                    otel_log_data = {}
+                    otel_log_data_raw = log_attributes.get('otel.log_data', '{}')
+                    if isinstance(otel_log_data_raw, str):
                         try:
-                            otel_log_data = json.loads(otel_log_data)
+                            otel_log_data = json.loads(otel_log_data_raw)
                         except json.JSONDecodeError:
-                            otel_log_data = {}
+                            logger.warning(f"Failed to parse otel.log_data as JSON: {otel_log_data_raw}")
                     
+                    # Build the log data
                     log_data = {
                         'timestamp': timestamp,
-                        'level': log_record.severity_text or otel_log_data.get('level', 'INFO'),
-                        'function_name': otel_log_data.get('function_name', 'unknown'),
-                        'module': otel_log_data.get('module', 'unknown'),
+                        'level': log_record.get('severity_text', otel_log_data.get('level', 'INFO')),
+                        'function_name': otel_log_data.get('function_name', scope_name),
+                        'module': otel_log_data.get('module', resource_attributes.get('service.name', 'unknown')),
                         'duration_ms': otel_log_data.get('duration_ms', 0.0),
                         'status': otel_log_data.get('status', 'unknown'),
                         'message': body,
@@ -204,13 +183,13 @@ def parse_protobuf_logs(protobuf_data: bytes) -> List[Dict[str, Any]]:
                         'result': otel_log_data.get('result'),
                         'error': otel_log_data.get('error'),
                         'error_type': otel_log_data.get('error_type'),
-                        'severity_number': log_record.severity_number,
-                        'severity_text': log_record.severity_text,
+                        'severity_number': log_record.get('severity_number'),
+                        'severity_text': log_record.get('severity_text'),
                         'resource_attributes': resource_attributes,
-                        'scope_attributes': scope_attributes,
                         'log_attributes': log_attributes,
-                        'trace_id': log_record.trace_id.hex() if log_record.trace_id else None,
-                        'span_id': log_record.span_id.hex() if log_record.span_id else None,
+                        'scope_name': scope_name,
+                        'trace_id': log_record.get('trace_id'),
+                        'span_id': log_record.get('span_id'),
                     }
                     
                     parsed_logs.append(log_data)
@@ -218,16 +197,14 @@ def parse_protobuf_logs(protobuf_data: bytes) -> List[Dict[str, Any]]:
         return parsed_logs
     
     except Exception as e:
+        logger.error(f"Failed to parse protobuf data: {e}")
         raise ValueError(f"Failed to parse protobuf data: {str(e)}")
 
-
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
-
+# Initialize FastAPI app and storage
 app = FastAPI(title="OpenTelemetry Log Viewer")
-# app.add_middleware(GzipRequestMiddleware)
 log_storage = LogStorage()
 
+# Mount static files and templates if you have them
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -235,189 +212,70 @@ templates = Jinja2Templates(directory="templates")
 async def dashboard(request: Request):
     return templates.TemplateResponse("dashboard.html", {"request": request})
 
-
-# @app.post("/api/logs")
-# async def receive_log(request: Request):
-#     """
-#     Receives a batch of logs in OTLP protobuf format, parses them,
-#     and adds them to the in-memory log storage.
-#     Handles gzip compressed payloads properly.
-#     """
-#     # Get the raw body (already decompressed by middleware if gzipped)
-#     body = await request.body()
-    
-#     # Check content type to determine format
-#     content_type = request.headers.get("content-type", "").lower()
-    
-#     logs_added = 0
-    
-#     try:
-#         if "application/x-protobuf" in content_type or "application/octet-stream" in content_type:
-#             # Handle protobuf format
-#             parsed_logs = parse_protobuf_logs(body)
-#             for log_data in parsed_logs:
-#                 log_storage.add_log(log_data)
-#                 logs_added += 1
-                
-#         elif "application/json" in content_type:
-#             # Handle JSON format (fallback for existing functionality)
-#             try:
-#                 payload = json.loads(body.decode('utf-8'))
-#             except UnicodeDecodeError:
-#                 payload = json.loads(body.decode('utf-8', errors='replace'))
-            
-#             # Parse JSON format (your existing logic)
-#             if "resourceLogs" in payload:
-#                 for resource_log in payload.get("resourceLogs", []):
-#                     resource_attributes = {}
-#                     for attr in resource_log.get("resource", {}).get("attributes", []):
-#                         key = attr.get("key")
-#                         value = list(attr.get("value", {}).values())[0]
-#                         resource_attributes[key] = value
-                        
-#                     for scope_log in resource_log.get("scopeLogs", []):
-#                         scope_attributes = {}
-#                         for attr in scope_log.get("scope", {}).get("attributes", []):
-#                             key = attr.get("key")
-#                             value = list(attr.get("value", {}).values())[0]
-#                             scope_attributes[key] = value
-                        
-#                         for log_record in scope_log.get("logRecords", []):
-#                             log_data = {}
-                            
-#                             log_data["timestamp"] = log_record.get("timeUnixNano")
-#                             log_data["severity_number"] = log_record.get("severityNumber")
-#                             log_data["severity_text"] = log_record.get("severityText")
-#                             log_data["body"] = list(log_record.get("body", {}).get("kvlistValue", {}).get("values", [{}])[0].get("value", {}).values())[0] if log_record.get("body") else ""
-                            
-#                             attributes = {}
-#                             for attribute in log_record.get("attributes", []):
-#                                 key = attribute.get("key")
-#                                 value = list(attribute.get("value", {}).values())[0]
-#                                 attributes[key] = value
-                            
-#                             log_data.update({
-#                                 "resource_attributes": resource_attributes,
-#                                 "scope_attributes": scope_attributes,
-#                                 "attributes": attributes
-#                             })
-                            
-#                             log_storage.add_log(log_data)
-#                             logs_added += 1
-#         else:
-#             # Try protobuf as default since OTLP uses protobuf by default
-#             try:
-#                 parsed_logs = parse_protobuf_logs(body)
-#                 for log_data in parsed_logs:
-#                     log_storage.add_log(log_data)
-#                     logs_added += 1
-#             except ValueError:
-#                 raise HTTPException(
-#                     status_code=400, 
-#                     detail=f"Unsupported content type: {content_type}. Expected application/x-protobuf or application/json"
-#                 )
-    
-#     except json.JSONDecodeError as e:
-#         raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
-#     except ValueError as e:
-#         raise HTTPException(status_code=400, detail=str(e))
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-#     return {"status": "success", "logs_added": logs_added}
-
-# @app.get("/api/logs", response_model=List[LogRecord])
-# async def get_logs_api(limit: int = 100, function_name: Optional[str] = None):
-#     return log_storage.get_logs(limit=limit, function_name=function_name)
-
-def protobuf_to_dict(protobuf_message):
-    """Convert protobuf message to dictionary for easy inspection"""
-    try:
-        return MessageToDict(protobuf_message, preserving_proto_field_name=True)
-    except Exception as e:
-        logger.error(f"Failed to convert protobuf to dict: {e}")
-        return {"error": f"Conversion failed: {str(e)}"}
-
 @app.post("/api/logs")
-async def decode_protobuf_logs(request: Request):
+async def receive_logs(request: Request):
     """
-    Decode protobuf logs and return the raw structure for inspection
+    Receives OTLP protobuf logs, parses them, and stores them
     """
     try:
-        # Get headers info
-        content_type = request.headers.get("content-type", "")
-        content_encoding = request.headers.get("content-encoding", "")
-        logger.info(f"Content-Type: {content_type}, Content-Encoding: {content_encoding}")
-        
-        # Get raw body
+        # Get the request body
         body = await request.body()
-        logger.info(f"Received {len(body)} bytes")
+        content_encoding = request.headers.get("content-encoding", "")
         
-        # Decompress if gzipped
+        # Handle gzip compression if present
         if content_encoding == "gzip":
-            try:
+            if body.startswith(b'\x1f\x8b'):  # Check gzip magic bytes
                 body = gzip.decompress(body)
-                logger.info(f"Decompressed to {len(body)} bytes")
-            except Exception as e:
-                logger.error(f"Gzip decompression failed: {e}")
-                raise HTTPException(status_code=400, detail=f"Gzip decompression failed: {str(e)}")
+                logger.info(f"Decompressed gzipped data to {len(body)} bytes")
+            else:
+                logger.info(f"Content-Encoding header says gzip but data is not compressed")
         
-        # Try to parse as OTLP protobuf
-        try:
-            export_request = logs_service_pb2.ExportLogsServiceRequest()
-            export_request.ParseFromString(body)
-            logger.info("Successfully parsed protobuf!")
-            
-            # Convert to dictionary for inspection
-            protobuf_dict = protobuf_to_dict(export_request)
-            
-            # Log the structure (truncated for readability)
-            logger.info("=== PROTOBUF STRUCTURE ===")
-            logger.info(json.dumps(protobuf_dict, indent=2, default=str)[:2000] + "...")
-            
-            # Count resource logs and log records
-            resource_logs_count = len(export_request.resource_logs)
-            total_log_records = sum(
-                len(scope_logs.log_records) 
-                for resource_logs in export_request.resource_logs
-                for scope_logs in resource_logs.scope_logs
-            )
-            
-            logger.info(f"Found {resource_logs_count} resource logs with {total_log_records} total log records")
-            
-            # Return the parsed structure for inspection
-            return {
-                "status": "success",
-                "message": "Protobuf decoded successfully",
-                "resource_logs_count": resource_logs_count,
-                "total_log_records": total_log_records,
-                "raw_protobuf_structure": protobuf_dict
-            }
-            
-        except Exception as e:
-            logger.error(f"Protobuf parsing failed: {e}")
-            logger.error(f"First 100 bytes as hex: {body[:100].hex()}")
-            raise HTTPException(status_code=400, detail=f"Protobuf parsing failed: {str(e)}")
-            
+        # Parse the protobuf logs
+        parsed_logs = parse_protobuf_logs(body)
+        
+        # Store each log
+        logs_added = 0
+        for log_data in parsed_logs:
+            log_storage.add_log(log_data)
+            logs_added += 1
+        
+        logger.info(f"Successfully added {logs_added} logs to storage")
+        
+        return {
+            "status": "success", 
+            "logs_added": logs_added,
+            "total_logs_in_storage": len(log_storage.logs)
+        }
+        
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        logger.error(f"Error processing logs: {e}")
+        raise HTTPException(status_code=400, detail=f"Error processing logs: {str(e)}")
 
-@app.get("/api/logs")
-async def get_debug_info():
-    return {
-        "message": "Protobuf debugging endpoint",
-        "note": "Check server logs for detailed protobuf structure when POST requests are made"
-    }
-
+@app.get("/api/logs", response_model=List[LogRecord])
+async def get_logs_api(limit: int = 100, function_name: Optional[str] = None):
+    """Get stored logs for display"""
+    return log_storage.get_logs(limit=limit, function_name=function_name)
 
 @app.get("/api/logs/{log_id}", response_model=LogRecord)
 async def get_log_detail_api(log_id: str):
+    """Get detailed view of a specific log"""
     log = log_storage.get_log_by_id(log_id)
     if not log:
         raise HTTPException(status_code=404, detail="Log not found")
     return log
 
+@app.get("/api/stats")
+async def get_stats():
+    """Get statistics about stored logs"""
+    total_logs = len(log_storage.logs)
+    functions = list(log_storage.logs_by_function.keys())
+    
+    return {
+        "total_logs": total_logs,
+        "unique_functions": len(functions),
+        "function_names": functions
+    }
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level='debug')
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -75,7 +75,7 @@ class StaticLogger:
             @functools.wraps(func)
             def wrapper(*args, **kwargs):
                 start_time = time.time()
-                timestamp = datetime.utcnow().isoformat()
+                timestamp = datetime.now().isoformat()
                 
                 log_data = {
                     "function_name": func.__name__,

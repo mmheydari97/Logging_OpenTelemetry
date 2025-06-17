@@ -1,22 +1,28 @@
 async function loadLogs() {
-    const response = await fetch('/api/logs'); 
-    const logs = await response.json(); 
-    const tbody = document.getElementById('logsTableBody');
-    if (logs.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="loading">No logs found</td></tr>'; 
-        return;
+    try {
+        const response = await fetch('/api/logs'); 
+        const logs = await response.json(); 
+        const tbody = document.getElementById('logsTableBody');
+        if (logs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="loading">No logs found</td></tr>'; 
+            return;
+        }
+        tbody.innerHTML = logs.map(log => `
+            <tr onclick="showLogDetails('${log.id}')">
+                <td>${new Date(log.timestamp).toLocaleString()}</td>
+                <td>${log.level}</td>
+                <td>${log.function_name}</td>
+                <td>${log.duration_ms}ms</td>
+                <td>${log.status}</td>
+                <td>${log.message}</td>
+            </tr>
+        `).join('');
+        } catch (error) {
+                    console.error('Failed to load logs:', error);
+                    document.getElementById('logsTableBody').innerHTML = 
+                        '<tr><td colspan="6" class="loading">Error loading logs</td></tr>';
+        }
     }
-    tbody.innerHTML = logs.map(log => `
-        <tr onclick="showLogDetails('${log.id}')">
-            <td>${new Date(log.timestamp).toLocaleString()}</td>
-            <td>${log.level}</td>
-            <td>${log.function_name}</td>
-            <td>${log.duration_ms}ms</td>
-            <td>${log.status}</td>
-            <td>${log.message}</td>
-        </tr>
-    `).join('');
-}
 
 async function showLogDetails(logId) {
     const response = await fetch(`/api/logs/${logId}`); 
