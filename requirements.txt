@@ -3,4 +3,5 @@ jinja2
 uvicorn
 opentelemetry-api
 opentelemetry-sdk
+opentelemetry-proto
 opentelemetry-exporter-otlp-proto-grpc
