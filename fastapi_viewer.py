@@ -44,7 +44,7 @@ class LogStorage:
         
         log_record = LogRecord(
             id=log_id,
-            timestamp=log_data.get('timestamp', datetime.utcnow().isoformat()),
+            timestamp=log_data.get('timestamp', datetime.now().isoformat()),
             level=log_data.get('level', 'INFO'),
             function_name=log_data.get('function_name', 'unknown'),
             module=log_data.get('module', 'unknown'),
@@ -158,7 +158,7 @@ def parse_protobuf_logs(protobuf_data: bytes) -> List[Dict[str, Any]]:
                         timestamp_seconds = int(timestamp_nano) / 1_000_000_000
                         timestamp = datetime.fromtimestamp(timestamp_seconds).isoformat()
                     else:
-                        timestamp = datetime.utcnow().isoformat()
+                        timestamp = datetime.now().isoformat()
                     
                     # Try to extract structured data from otel.log_data attribute
                     otel_log_data = {}
@@ -191,7 +191,13 @@ def parse_protobuf_logs(protobuf_data: bytes) -> List[Dict[str, Any]]:
                         'trace_id': log_record.get('trace_id'),
                         'span_id': log_record.get('span_id'),
                     }
-                    
+                    parts = [part for part in str(body).split('|')]
+
+                    if len(parts) >= 5:
+                        log_data['level'] = parts[1]
+                        log_data['function_name'] = parts[2]
+                        log_data['duration_ms'] = float(parts[3].split('ms')[0] if 'ms' in parts[3] else parts[3])
+                        log_data['message'] = parts[4]
                     parsed_logs.append(log_data)
         
         return parsed_logs
