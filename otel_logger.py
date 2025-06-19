@@ -43,28 +43,52 @@ class StaticLogger:
         self._setup_telemetry()
 
     def _setup_telemetry(self):
-        """Setup OpenTelemetry tracing and logging"""
+        """Setup OpenTelemetry tracing and logging with console output"""
         resource = Resource.create({
             "service.name": "python-logger",
             "service.version": "1.0.0"
         })
         
+        # Setup tracing
         trace.set_tracer_provider(TracerProvider(resource=resource))
         otlp_exporter = OTLPSpanExporter(endpoint=self.endpoint, insecure=True)
         span_processor = BatchSpanProcessor(otlp_exporter)
         trace.get_tracer_provider().add_span_processor(span_processor)
         self.tracer = trace.get_tracer(__name__)
         
+        # Setup OpenTelemetry logging
         logger_provider = LoggerProvider(resource=resource)
         set_logger_provider(logger_provider)
         
         otlp_log_exporter = OTLPLogExporter(endpoint=self.endpoint, insecure=True)
         logger_provider.add_log_record_processor(BatchLogRecordProcessor(otlp_log_exporter))
         
-        handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
-        logging.getLogger().addHandler(handler)
-        logging.getLogger().setLevel(logging.INFO)
+        # Create OpenTelemetry handler
+        otel_handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
         
+        # Create console handler for local output
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        
+        # Create a formatter for console output
+        console_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        console_handler.setFormatter(console_formatter)
+        
+        # Configure the root logger
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+        
+        # Clear any existing handlers to avoid duplicates
+        root_logger.handlers.clear()
+        
+        # Add both handlers
+        root_logger.addHandler(otel_handler)  # For OpenTelemetry
+        root_logger.addHandler(console_handler)  # For console output
+        
+        # Get our specific logger instance
         self.logger = logging.getLogger(__name__)
 
     def log_execution(self, level: str = "INFO", include_args: bool = False, include_result: bool = False):
@@ -100,11 +124,27 @@ class StaticLogger:
                         span.set_attribute("function.duration_ms", duration_ms)
                         span.set_attribute("function.status", "success")
                         
-                        # Send the actual message content instead of formatted string
-                        self.logger.info(
-                            log_data.message, 
-                            extra={"otel.log_data": json.dumps(log_data.to_dict())}
-                        )
+                        # Create a console-friendly message
+                        console_message = f"{func.__name__}() executed successfully in {duration_ms}ms"
+                        if include_args and (args or kwargs):
+                            args_str = f"args={args}" if args else ""
+                            kwargs_str = f"kwargs={kwargs}" if kwargs else ""
+                            args_info = ", ".join(filter(None, [args_str, kwargs_str]))
+                            console_message += f" [{args_info}]"
+                        if include_result and result is not None:
+                            console_message += f" -> {str(result)[:100]}{'...' if len(str(result)) > 100 else ''}"
+                        
+                        # Log with both the detailed data for OpenTelemetry and readable message for console
+                        if level.upper() == "WARNING":
+                            self.logger.warning(
+                                console_message, 
+                                extra={"otel.log_data": json.dumps(log_data.to_dict())}
+                            )
+                        else:
+                            self.logger.info(
+                                console_message, 
+                                extra={"otel.log_data": json.dumps(log_data.to_dict())}
+                            )
                         return result
                         
                     except Exception as e:
@@ -118,7 +158,7 @@ class StaticLogger:
                             duration_ms=duration_ms,
                             error=str(e),
                             error_type=type(e).__name__,
-                            message=f"ERROR: {str(e)}",  # Actual error message that would appear in stderr
+                            message=f"ERROR: {str(e)}",
                             args=str(args) if include_args and args else None,
                             kwargs=kwargs if include_args and kwargs else None
                         )
@@ -128,9 +168,17 @@ class StaticLogger:
                         span.set_attribute("function.error", str(e))
                         span.record_exception(e)
                         
-                        # Send the actual error message instead of formatted string
+                        # Create console-friendly error message
+                        console_message = f"{func.__name__}() failed in {duration_ms}ms: {type(e).__name__}: {str(e)}"
+                        if include_args and (args or kwargs):
+                            args_str = f"args={args}" if args else ""
+                            kwargs_str = f"kwargs={kwargs}" if kwargs else ""
+                            args_info = ", ".join(filter(None, [args_str, kwargs_str]))
+                            console_message += f" [{args_info}]"
+                        
+                        # Log error with both detailed data and readable message
                         self.logger.error(
-                            log_data.message, 
+                            console_message, 
                             extra={"otel.log_data": json.dumps(log_data.to_dict())}
                         )
                         raise
@@ -152,6 +200,7 @@ class StaticLogger:
             **extra_data
         )
         
+        # The message will appear on console as-is, plus the structured data goes to OpenTelemetry
         if level.upper() == "ERROR":
             self.logger.error(message, extra={"otel.log_data": json.dumps(log_data.to_dict())})
         elif level.upper() == "WARNING":
