@@ -2,6 +2,8 @@ import time
 import functools
 import json
 import logging
+import inspect
+import os
 from datetime import datetime
 from typing import Optional, Callable
 from opentelemetry import trace
@@ -80,6 +82,7 @@ class StaticLogger:
         Ensures function execution and duration tracking are robust,
         with separate error handling for OpenTelemetry logging/tracing.
         """
+        level = level.upper()
         def decorator(func: Callable) -> Callable:
             @functools.wraps(func)
             def wrapper(*args, **kwargs):
@@ -163,7 +166,7 @@ class StaticLogger:
                             if include_result and result is not None:
                                 console_message += f" -> {str(result)[:100]}{'...' if len(str(result)) > 100 else ''}"
 
-                            if level.upper() == "WARNING":
+                            if level == "WARNING":
                                 self.logger.warning(
                                     console_message,
                                     extra={"otel.log_data": json.dumps(log_data.to_dict())}
@@ -195,48 +198,59 @@ class StaticLogger:
         logging.error(f"{message} Error: {type(exception).__name__}: {str(exception)}", exc_info=True)
 
 
-    def log_custom(self, message: str, level: str = "INFO", **extra_data):
+    def log_custom(self, message: str, level: str = "INFO", auto_locate: bool = False):
         """
         Method to log custom messages with optional extra data.
+        If auto_locate is True, appends file, function, and line information to the message.
         Robustly handles OpenTelemetry logging even if not fully configured or on error.
         """
+        display_message = message # Keep original message for log_data
+        level = level.upper()
         try:
+            # If auto_locate is True, get caller information
+            if auto_locate:
+                frames = inspect.stack()
+                frames = frames[:0:-1] if len(frames) > 1 else None
+                location_info = ""
+                for frame in frames:
+                    location_info += f", {os.path.basename(frame.filename)}: {frame.lineno} -> {frame.function}\n"
+                
+                display_message = f"{display_message} (Called from{location_info})"
+                del frames
+
             if not self._initialized:
                 logging.warning(
                     f"Logger is not configured. Custom log message will not be sent to OpenTelemetry. Call logger.configure() first."
                 )
-                # Still log to console if OTel isn't set up
-                if level.upper() == "ERROR":
-                    logging.error(message)
-                elif level.upper() == "WARNING":
-                    logging.warning(message)
+                if level == "ERROR":
+                    logging.error(display_message)
+                elif level == "WARNING":
+                    logging.warning(display_message)
                 else:
-                    logging.info(message)
+                    logging.info(display_message)
                 return
 
             log_data = LogData(
                 timestamp=datetime.now().isoformat(),
                 level=level,
-                function_name="custom_log",
-                module=__name__,
+                function_name="custom_log", # This function's name
+                module=__name__, # This module
                 duration_ms=0.0,
                 status="info",
-                message=message,
-                **extra_data
+                message=display_message,
             )
-
-            if level.upper() == "ERROR":
-                self.logger.error(message, extra={"otel.log_data": json.dumps(log_data.to_dict())})
-            elif level.upper() == "WARNING":
-                self.logger.warning(message, extra={"otel.log_data": json.dumps(log_data.to_dict())})
+            
+            if level == "ERROR":
+                self.logger.error(display_message, extra={"otel.log_data": json.dumps(log_data.to_dict())})
+            elif level == "WARNING":
+                self.logger.warning(display_message, extra={"otel.log_data": json.dumps(log_data.to_dict())})
             else:
-                self.logger.info(message, extra={"otel.log_data": json.dumps(log_data.to_dict())})
+                self.logger.info(display_message, extra={"otel.log_data": json.dumps(log_data.to_dict())})
 
         except Exception as e_custom_log:
             self._handle_decorator_failure(
-                f"An error occurred while attempting to send a custom log: '{message}'.",
+                f"An error occurred while attempting to send a custom log: '{display_message}'.",
                 e_custom_log
             )
-
 
 logger = StaticLogger()
