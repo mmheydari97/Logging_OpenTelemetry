@@ -1,5 +1,6 @@
 import time
 import functools
+import json
 from datetime import datetime
 from typing import Optional, Callable
 from opentelemetry import trace
@@ -12,6 +13,8 @@ from opentelemetry._logs import set_logger_provider
 from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+
+from log_models import LogData
 
 
 class StaticLogger:
@@ -30,16 +33,13 @@ class StaticLogger:
     def __init__(self):
         if not self._initialized:
             self.endpoint = "http://localhost:4317"  # Default OTLP endpoint 
-            self.log_format = "{timestamp} | {level} | {function_name} | {duration_ms}ms | {message}"
             self._setup_telemetry()
             StaticLogger._initialized = True
 
-    def configure(self, endpoint: str = None, log_format: str = None):
-        """Configure the logger endpoint and format"""
+    def configure(self, endpoint: str = None):
+        """Configure the logger endpoint"""
         if endpoint:
             self.endpoint = endpoint
-        if log_format:
-            self.log_format = log_format
         self._setup_telemetry()
 
     def _setup_telemetry(self):
@@ -75,18 +75,6 @@ class StaticLogger:
             @functools.wraps(func)
             def wrapper(*args, **kwargs):
                 start_time = time.time()
-                timestamp = datetime.now().isoformat()
-                
-                log_data = {
-                    "function_name": func.__name__,
-                    "module": func.__module__,
-                    "timestamp": timestamp,
-                    "level": level
-                }
-                
-                if include_args:
-                    log_data["args"] = str(args) if args else None
-                    log_data["kwargs"] = kwargs if kwargs else None
                 
                 with self.tracer.start_as_current_span(f"{func.__name__}_execution") as span:
                     span.set_attribute("function.name", func.__name__)
@@ -97,55 +85,79 @@ class StaticLogger:
                         end_time = time.time()
                         duration_ms = round((end_time - start_time) * 1000, 2)
                         
-                        log_data.update({
-                            "duration_ms": duration_ms,
-                            "status": "success"
-                        })
-                        
-                        if include_result:
-                            log_data["result"] = str(result) if result is not None else None
+                        # Create success log data
+                        log_data = LogData.create_success_log(
+                            function_name=func.__name__,
+                            module=func.__module__,
+                            duration_ms=duration_ms,
+                            message=f"Function completed successfully" + (f" -> {str(result)[:100]}..." if include_result and result is not None else ""),
+                            result=str(result) if include_result and result is not None else None,
+                            args=str(args) if include_args and args else None,
+                            kwargs=kwargs if include_args and kwargs else None,
+                            level=level
+                        )
                         
                         span.set_attribute("function.duration_ms", duration_ms)
                         span.set_attribute("function.status", "success")
                         
-                        formatted_message = self.log_format.format(
-                            timestamp=timestamp,
-                            level=level,
-                            function_name=func.__name__,
-                            duration_ms=duration_ms, 
-                            message="Function executed successfully" 
+                        # Send the actual message content instead of formatted string
+                        self.logger.info(
+                            log_data.message, 
+                            extra={"otel.log_data": json.dumps(log_data.to_dict())}
                         )
-                        
-                        self.logger.info(formatted_message, extra={"otel.log_data": log_data})
                         return result
                         
                     except Exception as e:
                         end_time = time.time()
                         duration_ms = round((end_time - start_time) * 1000, 2)
                         
-                        log_data.update({
-                            "duration_ms": duration_ms,
-                            "status": "error",
-                            "error": str(e), 
-                            "error_type": type(e).__name__
-                        })
+                        # Create error log data
+                        log_data = LogData.create_error_log(
+                            function_name=func.__name__,
+                            module=func.__module__,
+                            duration_ms=duration_ms,
+                            error=str(e),
+                            error_type=type(e).__name__,
+                            message=f"ERROR: {str(e)}",  # Actual error message that would appear in stderr
+                            args=str(args) if include_args and args else None,
+                            kwargs=kwargs if include_args and kwargs else None
+                        )
                         
                         span.set_attribute("function.duration_ms", duration_ms)
                         span.set_attribute("function.status", "error")
                         span.set_attribute("function.error", str(e))
                         span.record_exception(e)
                         
-                        formatted_message = self.log_format.format(
-                            timestamp=timestamp, 
-                            level="ERROR", 
-                            function_name=func.__name__, 
-                            duration_ms=duration_ms, 
-                            message=f"Function failed with error: {str(e)}"
+                        # Send the actual error message instead of formatted string
+                        self.logger.error(
+                            log_data.message, 
+                            extra={"otel.log_data": json.dumps(log_data.to_dict())}
                         )
-                        
-                        self.logger.error(formatted_message, extra={"otel.log_data": log_data})
                         raise
             return wrapper
         return decorator
+
+    def log_custom(self, message: str, level: str = "INFO", **extra_data):
+        """
+        Method to log custom messages with optional extra data
+        """
+        log_data = LogData(
+            timestamp=datetime.now().isoformat(),
+            level=level,
+            function_name="custom_log",
+            module=__name__,
+            duration_ms=0.0,
+            status="info",
+            message=message,
+            **extra_data
+        )
+        
+        if level.upper() == "ERROR":
+            self.logger.error(message, extra={"otel.log_data": json.dumps(log_data.to_dict())})
+        elif level.upper() == "WARNING":
+            self.logger.warning(message, extra={"otel.log_data": json.dumps(log_data.to_dict())})
+        else:
+            self.logger.info(message, extra={"otel.log_data": json.dumps(log_data.to_dict())})
+
 
 logger = StaticLogger()

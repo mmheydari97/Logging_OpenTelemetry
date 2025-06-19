@@ -73,5 +73,8 @@ The dashboard auto-refreshes every 5 seconds.
 
 * Logs are kept in memory (max 1000); adapt `LogStorage` for persistent storage in production.
 * Adjust OTLP endpoints in `otel_logger.py` and `docker-compose.yml` as needed.
-
+* To be able to retrieve the logs locally in json format, you need to execute the code below:
+```sh
+docker logs otel-collector > logs/stdout.log 2>&1
+```
 

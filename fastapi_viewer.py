@@ -9,30 +9,16 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 import uuid
 from collections import defaultdict
-from pydantic import BaseModel
 
 from google.protobuf.json_format import MessageToDict
 from opentelemetry.proto.collector.logs.v1 import logs_service_pb2
+
+from log_models import LogData, LogRecord
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class LogRecord(BaseModel):
-    id: str
-    timestamp: str
-    level: str
-    function_name: str
-    module: str
-    duration_ms: float
-    status: str
-    message: str
-    args: Optional[str] = None
-    kwargs: Optional[Dict[str, Any]] = None
-    result: Optional[str] = None
-    error: Optional[str] = None
-    error_type: Optional[str] = None
-    raw_data: Dict[str, Any]
 
 class LogStorage:
     def __init__(self):
@@ -40,24 +26,8 @@ class LogStorage:
         self.logs_by_function: Dict[str, List[LogRecord]] = defaultdict(list)
 
     def add_log(self, log_data: Dict[str, Any]) -> str:
-        log_id = str(uuid.uuid4())
-        
-        log_record = LogRecord(
-            id=log_id,
-            timestamp=log_data.get('timestamp', datetime.now().isoformat()),
-            level=log_data.get('level', 'INFO'),
-            function_name=log_data.get('function_name', 'unknown'),
-            module=log_data.get('module', 'unknown'),
-            duration_ms=log_data.get('duration_ms', 0.0),
-            status=log_data.get('status', 'unknown'),
-            message=log_data.get('message', ''),
-            args=log_data.get('args'),
-            kwargs=log_data.get('kwargs'),
-            result=log_data.get('result'),
-            error=log_data.get('error'),
-            error_type=log_data.get('error_type'),
-            raw_data=log_data
-        )
+        """Add a log entry to storage, converting dict to LogRecord"""
+        log_record = LogRecord.from_dict(log_data)
         
         self.logs.append(log_record)
         self.logs_by_function[log_record.function_name].append(log_record)
@@ -69,7 +39,23 @@ class LogStorage:
                 if removed_log in self.logs_by_function[removed_log.function_name]:
                     self.logs_by_function[removed_log.function_name].remove(removed_log)
         
-        return log_id
+        return log_record.id
+
+    def add_log_from_log_data(self, log_data: LogData) -> str:
+        """Add a log entry from LogData object"""
+        log_record = LogRecord(log_data=log_data, raw_data=log_data.to_dict())
+        
+        self.logs.append(log_record)
+        self.logs_by_function[log_record.function_name].append(log_record)
+        
+        # Keep only last 1000 logs
+        if len(self.logs) > 1000:
+            removed_log = self.logs.pop(0)
+            if removed_log.function_name in self.logs_by_function:
+                if removed_log in self.logs_by_function[removed_log.function_name]:
+                    self.logs_by_function[removed_log.function_name].remove(removed_log)
+        
+        return log_record.id
 
     def get_logs(self, limit: int = 100, function_name: Optional[str] = None) -> List[LogRecord]:
         if function_name:
@@ -83,6 +69,7 @@ class LogStorage:
             if log.id == log_id:
                 return log
         return None
+
 
 def extract_attribute_value(attr_dict):
     """Extract value from OTLP attribute dictionary"""
@@ -101,6 +88,7 @@ def extract_attribute_value(attr_dict):
     else:
         return str(value_dict)
 
+
 def extract_body_value(body_dict):
     """Extract value from OTLP body dictionary"""
     if 'string_value' in body_dict:
@@ -114,8 +102,9 @@ def extract_body_value(body_dict):
     else:
         return str(body_dict)
 
-def parse_protobuf_logs(protobuf_data: bytes) -> List[Dict[str, Any]]:
-    """Parse OTLP protobuf logs data and return list of log dictionaries"""
+
+def parse_protobuf_logs(protobuf_data: bytes) -> List[LogData]:
+    """Parse OTLP protobuf logs data and return list of LogData objects"""
     try:
         # Parse the ExportLogsServiceRequest
         export_request = logs_service_pb2.ExportLogsServiceRequest()
@@ -146,7 +135,7 @@ def parse_protobuf_logs(protobuf_data: bytes) -> List[Dict[str, Any]]:
                         value = extract_attribute_value(attr)
                         log_attributes[key] = value
                     
-                    # Extract log body
+                    # Extract log body (this is the actual message)
                     body = ""
                     if 'body' in log_record:
                         body = extract_body_value(log_record['body'])
@@ -154,7 +143,6 @@ def parse_protobuf_logs(protobuf_data: bytes) -> List[Dict[str, Any]]:
                     # Convert timestamp from nanoseconds to ISO format
                     timestamp_nano = log_record.get('time_unix_nano')
                     if timestamp_nano:
-                        # Convert string nanoseconds to datetime
                         timestamp_seconds = int(timestamp_nano) / 1_000_000_000
                         timestamp = datetime.fromtimestamp(timestamp_seconds).isoformat()
                     else:
@@ -162,22 +150,22 @@ def parse_protobuf_logs(protobuf_data: bytes) -> List[Dict[str, Any]]:
                     
                     # Try to extract structured data from otel.log_data attribute
                     otel_log_data = {}
-                    otel_log_data_raw = log_attributes.get('otel.log_data', '{}')
+                    otel_log_data_raw = log_attributes.get('otel.log_data')
                     if isinstance(otel_log_data_raw, str):
                         try:
                             otel_log_data = json.loads(otel_log_data_raw)
                         except json.JSONDecodeError:
                             logger.warning(f"Failed to parse otel.log_data as JSON: {otel_log_data_raw}")
                     
-                    # Build the log data
-                    log_data = {
-                        'timestamp': timestamp,
-                        'level': log_record.get('severity_text', otel_log_data.get('level', 'INFO')),
+                    # Create LogData object with all available information
+                    log_data_dict = {
+                        'timestamp': otel_log_data.get('timestamp', timestamp),
+                        'level': otel_log_data.get('level', log_record.get('severity_text', 'INFO')),
                         'function_name': otel_log_data.get('function_name', scope_name),
                         'module': otel_log_data.get('module', resource_attributes.get('service.name', 'unknown')),
                         'duration_ms': otel_log_data.get('duration_ms', 0.0),
                         'status': otel_log_data.get('status', 'unknown'),
-                        'message': body,
+                        'message': body,  # Use the actual log message body
                         'args': otel_log_data.get('args'),
                         'kwargs': otel_log_data.get('kwargs'),
                         'result': otel_log_data.get('result'),
@@ -191,20 +179,46 @@ def parse_protobuf_logs(protobuf_data: bytes) -> List[Dict[str, Any]]:
                         'trace_id': log_record.get('trace_id'),
                         'span_id': log_record.get('span_id'),
                     }
-                    parts = [part for part in str(body).split('|')]
-
+                    
+                    # Handle legacy format parsing (if body contains pipe-separated values)
+                    parts = [part.strip() for part in str(body).split('|')]
                     if len(parts) >= 5:
-                        log_data['level'] = parts[1]
-                        log_data['function_name'] = parts[2]
-                        log_data['duration_ms'] = float(parts[3].split('ms')[0] if 'ms' in parts[3] else parts[3])
-                        log_data['message'] = parts[4]
-                    parsed_logs.append(log_data)
+                        log_data_dict['level'] = parts[1]
+                        log_data_dict['function_name'] = parts[2]
+                        duration_part = parts[3]
+                        if 'ms' in duration_part:
+                            try:
+                                log_data_dict['duration_ms'] = float(duration_part.split('ms')[0])
+                            except ValueError:
+                                pass
+                        log_data_dict['message'] = parts[4]
+                    
+                    # Filter out None values and create LogData object
+                    filtered_dict = {k: v for k, v in log_data_dict.items() if v is not None}
+                    
+                    try:
+                        log_data = LogData(**filtered_dict)
+                        parsed_logs.append(log_data)
+                    except Exception as e:
+                        logger.warning(f"Failed to create LogData object: {e}, falling back to dict")
+                        # Fallback: create a basic LogData with minimal required fields
+                        basic_log_data = LogData(
+                            timestamp=filtered_dict.get('timestamp', datetime.now().isoformat()),
+                            level=filtered_dict.get('level', 'INFO'),
+                            function_name=filtered_dict.get('function_name', 'unknown'),
+                            module=filtered_dict.get('module', 'unknown'),
+                            duration_ms=filtered_dict.get('duration_ms', 0.0),
+                            status=filtered_dict.get('status', 'unknown'),
+                            message=filtered_dict.get('message', body)
+                        )
+                        parsed_logs.append(basic_log_data)
         
         return parsed_logs
     
     except Exception as e:
         logger.error(f"Failed to parse protobuf data: {e}")
         raise ValueError(f"Failed to parse protobuf data: {str(e)}")
+
 
 # Initialize FastAPI app and storage
 app = FastAPI(title="OpenTelemetry Log Viewer")
@@ -214,9 +228,11 @@ log_storage = LogStorage()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     return templates.TemplateResponse("dashboard.html", {"request": request})
+
 
 @app.post("/api/logs")
 async def receive_logs(request: Request):
@@ -236,13 +252,13 @@ async def receive_logs(request: Request):
             else:
                 logger.info(f"Content-Encoding header says gzip but data is not compressed")
         
-        # Parse the protobuf logs
+        # Parse the protobuf logs into LogData objects
         parsed_logs = parse_protobuf_logs(body)
         
         # Store each log
         logs_added = 0
         for log_data in parsed_logs:
-            log_storage.add_log(log_data)
+            log_storage.add_log_from_log_data(log_data)
             logs_added += 1
         
         logger.info(f"Successfully added {logs_added} logs to storage")
@@ -257,10 +273,12 @@ async def receive_logs(request: Request):
         logger.error(f"Error processing logs: {e}")
         raise HTTPException(status_code=400, detail=f"Error processing logs: {str(e)}")
 
+
 @app.get("/api/logs", response_model=List[LogRecord])
 async def get_logs_api(limit: int = 100, function_name: Optional[str] = None):
     """Get stored logs for display"""
     return log_storage.get_logs(limit=limit, function_name=function_name)
+
 
 @app.get("/api/logs/{log_id}", response_model=LogRecord)
 async def get_log_detail_api(log_id: str):
@@ -269,6 +287,23 @@ async def get_log_detail_api(log_id: str):
     if not log:
         raise HTTPException(status_code=404, detail="Log not found")
     return log
+
+
+@app.get("/api/logs/preview/{log_id}")
+async def get_log_preview_api(log_id: str):
+    """Get preview fields for a specific log"""
+    log = log_storage.get_log_by_id(log_id)
+    if not log:
+        raise HTTPException(status_code=404, detail="Log not found")
+    return log.get_preview_fields()
+
+
+@app.get("/api/logs/preview")
+async def get_logs_preview_api(limit: int = 100, function_name: Optional[str] = None):
+    """Get preview fields for multiple logs"""
+    logs = log_storage.get_logs(limit=limit, function_name=function_name)
+    return [log.get_preview_fields() for log in logs]
+
 
 @app.get("/api/stats")
 async def get_stats():
@@ -282,6 +317,8 @@ async def get_stats():
         "function_names": functions
     }
 
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+    
