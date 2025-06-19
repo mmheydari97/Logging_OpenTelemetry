@@ -31,16 +31,14 @@ class StaticLogger:
         return cls._instance
 
     def __init__(self):
-        if not self._initialized:
-            self.endpoint = "http://localhost:4317"  # Default OTLP endpoint 
-            self._setup_telemetry()
-            StaticLogger._initialized = True
+        pass
 
     def configure(self, endpoint: str = None):
         """Configure the logger endpoint"""
-        if endpoint:
-            self.endpoint = endpoint
-        self._setup_telemetry()
+        if not self._initialized:
+            self.endpoint = endpoint if endpoint else "http://localhost:4317"  # Default OTLP endpoint 
+            self._setup_telemetry()
+            StaticLogger._initialized = True
 
     def _setup_telemetry(self):
         """Setup OpenTelemetry tracing and logging with console output"""
@@ -98,6 +96,12 @@ class StaticLogger:
         def decorator(func: Callable) -> Callable:
             @functools.wraps(func)
             def wrapper(*args, **kwargs):
+                if not self._initialized:
+                    logging.warning(
+                        f"Logger is not configured. Function '{func.__name__}' execution will not be logged by OpenTelemetry. Call logger.configure() first."
+                    )
+                    return func(*args, **kwargs) # Still execute the function
+
                 start_time = time.time()
                 
                 with self.tracer.start_as_current_span(f"{func.__name__}_execution") as span:
