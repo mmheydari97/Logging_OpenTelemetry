@@ -210,13 +210,12 @@ class StaticLogger:
             # If auto_locate is True, get caller information
             if auto_locate:
                 frames = inspect.stack()
-                frames = frames[:0:-1] if len(frames) > 1 else None
-                location_info = ""
-                for frame in frames:
-                    location_info += f", {os.path.basename(frame.filename)}: {frame.lineno} -> {frame.function}\n"
-                
-                display_message = f"{display_message} (Called from{location_info})"
-                del frames
+                frames = frames[1:5] if len(frames) > 1 else None
+                location_info = "\n".join(
+                    f"{os.path.basename(frame.filename)}: {frame.lineno} -> {frame.function}"
+                    for frame in frames
+                )
+                display_message = f"{message} (Called from:\n{location_info})"
 
             if not self._initialized:
                 logging.warning(
